@@ -94,6 +94,7 @@ dependencies = [
     { name = "argon2-cffi" },
     { name = "fastapi" },
     { name = "itsdangerous" },
+    { name = "starlette" },
 ]
 
 [package.dev-dependencies]
@@ -106,6 +107,7 @@ requires-dist = [
     { name = "argon2-cffi", specifier = ">=25.1.0" },
     { name = "fastapi", specifier = ">=0.138.2" },
     { name = "itsdangerous", specifier = ">=2.2.0" },
+    { name = "starlette", specifier = ">=1.3.1" },
 ]
 
 [package.metadata.requires-dev]
