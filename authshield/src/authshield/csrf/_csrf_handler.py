@@ -96,8 +96,8 @@ class CSRFMiddleware:
             return
 
         request = Request(scope, receive)
-
-        if request.method not in self.config.safe_methods:
+            
+        if self._check_applicability(request):
             error_msg = self._validate_origins(request) or self._validate_tokens(
                 request
             )
@@ -114,6 +114,24 @@ class CSRFMiddleware:
             await send(message)
 
         await self.app(scope, receive, send_wrapper)
+        
+    def _check_applicability(self, request: Request) -> bool:
+        """Determine whether CSRF validation applies to this request.
+
+        Safe methods and paths listed in ``excluded_paths`` (with optional
+        trailing ``*`` wildcard) are exempt. Returns ``False`` to skip
+        validation, ``True`` to proceed.
+        """
+        if request.method in self.config.safe_methods:
+            return False
+        
+        path = request.url.path
+        
+        for excluded_path in self.config.excluded_paths:
+            if (excluded_path.endswith('*') and path.startswith(excluded_path[:-1])) or (excluded_path == path):
+                return False
+            
+        return True
 
     def _get_effective_host(self, headers: Headers) -> str:
         """Extracts the definitive network location, respecting reverse proxies.
@@ -192,17 +210,44 @@ class CSRFMiddleware:
         if not cookie_token or not header_token:
             return f"CSRF token missing (Cookie: {bool(cookie_token)}, Header: {bool(header_token)})"
 
-        if not hmac.compare_digest(cookie_token, header_token):
-            return "CSRF token mismatch between client header and client cookie"
+        if self.config.signed_mode:
+            session_id = request.cookies.get(self.config.session_cookie_name)
+            if not session_id:
+                return "CSRF verification failed: Missing session identifier for signed mode"
+            
+            # Split the incoming cookie into the raw token and the signature
+            try:
+                raw_cookie_token, _ = cookie_token.split(".", 1)
+            except ValueError:
+                return "CSRF verification failed: Malformed signed cookie"
+
+            # Sign the RAW token (not the whole cookie string)
+            expected_signature = hmac.new(
+                self.config.secret_key.encode("utf-8"),
+                f"{session_id}!{raw_cookie_token}".encode("utf-8"),
+                digestmod="sha256"
+            ).hexdigest()
+
+            if not hmac.compare_digest(expected_signature, header_token):
+                return "CSRF verification failed: Signed token signature mismatch"
+        
+        else:
+            if not hmac.compare_digest(cookie_token, header_token):
+                return "CSRF token mismatch between client header and client cookie"
 
         return None
 
     def _ensure_csrf_cookie(self, scope: Scope, message: dict, request: Request) -> None:
         """Injects or maintains the client-side CSRF token cookie in the response.
 
-        If the request already carries a CSRF cookie its value is echoed back
-        unchanged to avoid race conditions from concurrent requests. Otherwise
-        a fresh 32-byte URL-safe token is generated via :func:`secrets.token_urlsafe`.
+        In standard mode the existing token is echoed back to avoid race
+        conditions; a fresh token is generated only when none exists.
+
+        In signed mode the token is bound to the current session:
+        - No session + existing token → the stale cookie is deleted.
+        - No session + no token → nothing is set (failsafe for unauthenticated visits).
+        - Session + no token → a fresh ``raw.sig`` token is generated.
+        - Session + existing token → the existing token is echoed back unchanged.
 
         Parameters
         ----------
@@ -215,9 +260,14 @@ class CSRFMiddleware:
         """
         res_headers = MutableHeaders(scope=message)
 
-        token = request.cookies.get(self.config.cookie_name)
-        if not token:
-            token = secrets.token_urlsafe(32)
+        if not self.config.signed_mode:
+            token = request.cookies.get(self.config.cookie_name)
+            if not token:
+                token = secrets.token_urlsafe(32)
+        else:
+            token = self._get_signed_token(scope, request, res_headers)
+            if token is None:
+                return
 
         cookie_str = (
             f"{self.config.cookie_name}={token}; "
@@ -233,6 +283,40 @@ class CSRFMiddleware:
             cookie_str += "; Secure"
 
         res_headers.append("Set-Cookie", cookie_str)
+
+    def _get_signed_token(self, scope, request, res_headers):
+        """Resolve or generate a session-bound CSRF token for signed mode.
+
+        Returns the token string to set as a cookie, or ``None`` when no
+        cookie should be emitted (no session present, or stale cookie was
+        deleted).
+        """
+        session_id = request.cookies.get(self.config.session_cookie_name)
+
+        if not session_id:
+            if request.cookies.get(self.config.cookie_name):
+                delete = (
+                        f"{self.config.cookie_name}=; "
+                        f"Path={self.config.cookie_path}; "
+                        f"Max-Age=0"
+                    )
+                if self.config.cookie_domain:
+                    delete += f"; Domain={self.config.cookie_domain}"
+                if scope.get("scheme") == "https" or self.config.cookie_secure:
+                    delete += "; Secure"
+                res_headers.append("Set-Cookie", delete)
+            return
+
+        token = request.cookies.get(self.config.cookie_name)
+        if not token:
+            raw_token = secrets.token_urlsafe(32)
+            signature = hmac.new(
+                    self.config.secret_key.encode("utf-8"),
+                    f"{session_id}!{raw_token}".encode("utf-8"),
+                    digestmod="sha256",
+                ).hexdigest()
+            token = f"{raw_token}.{signature}"
+        return token
 
     async def _trigger_error(self, scope: Scope, receive: Receive, send: Send) -> None:
         """Routes CSRF failures through the application's exception-handling machinery.

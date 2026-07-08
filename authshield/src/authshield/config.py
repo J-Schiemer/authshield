@@ -1,5 +1,5 @@
 from typing import Literal, Set, List, Optional
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 
 class CsrfConfig(BaseModel):
@@ -35,6 +35,18 @@ class CsrfConfig(BaseModel):
     safe_methods : Set[str]
         HTTP methods exempt from CSRF validation. Default ``{"GET", "HEAD",
         "OPTIONS", "TRACE"}``.
+    excluded_paths : List[str]
+        Request paths that bypass CSRF validation entirely. A trailing ``*``
+        matches all sub-paths (e.g. ``"/api/public/*"``). Default ``[]``.
+    signed_mode : bool
+        When ``True`` the CSRF token is cryptographically bound to the user's
+        session via HMAC-SHA256. Requires ``secret_key``. Default ``False``.
+    session_cookie_name : str
+        Name of the cookie holding the session identifier used for signed-mode
+        token binding. Default ``"session"``.
+    secret_key : Optional[str]
+        HMAC secret key required when ``signed_mode`` is enabled. Must be a
+        high-entropy string kept private to the server. Default ``None``.
 
     Example
     -------
@@ -57,3 +69,16 @@ class CsrfConfig(BaseModel):
     cookie_secure: bool = True
     trusted_origins: List[str] = Field(default_factory=list)
     safe_methods: Set[str] = {"GET", "HEAD", "OPTIONS", "TRACE"}
+ 
+    excluded_paths: List[str] = Field(default_factory=list)
+ 
+    signed_mode: bool = False
+    session_cookie_name: str = "session"
+    secret_key: Optional[str] = None
+
+    @model_validator(mode="after")
+    def validate_signed_mode_requirements(self) -> CsrfConfig:
+        """Ensures a secret key is present when signed_mode is enabled."""
+        if self.signed_mode and not self.secret_key:
+            raise ValueError("secret_key must be provided when signed_mode is True.")
+        return self

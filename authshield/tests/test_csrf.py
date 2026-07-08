@@ -1,6 +1,7 @@
 """Unit tests for the CSRF protection middleware (Double-Submit Cookie pattern)."""
 
 import asyncio
+import hmac
 from typing import Any, Dict, List, Optional
 
 import pytest
@@ -654,3 +655,383 @@ class TestCsrfConfigDefaults:
     def test_default_cookie_domain_none(self) -> None:
         config = CsrfConfig()
         assert config.cookie_domain is None
+
+    def test_default_signed_mode_false(self) -> None:
+        """``signed_mode`` defaults to ``False``."""
+        config = CsrfConfig()
+        assert config.signed_mode is False
+
+    def test_default_session_cookie_name(self) -> None:
+        """``session_cookie_name`` defaults to ``"session"``."""
+        config = CsrfConfig()
+        assert config.session_cookie_name == "session"
+
+    def test_default_secret_key_none(self) -> None:
+        """``secret_key`` defaults to ``None``."""
+        config = CsrfConfig()
+        assert config.secret_key is None
+
+    def test_default_excluded_paths_empty(self) -> None:
+        """``excluded_paths`` defaults to an empty list."""
+        config = CsrfConfig()
+        assert config.excluded_paths == []
+
+
+# ---------------------------------------------------------------------------
+# CsrfConfig signed_mode validation
+# ---------------------------------------------------------------------------
+
+
+class TestCsrfConfigSignedModeValidation:
+    def test_signed_mode_without_secret_key_raises(self) -> None:
+        """``signed_mode=True`` without ``secret_key`` raises ``ValueError``."""
+        with pytest.raises(ValueError, match="secret_key must be provided when signed_mode is True"):
+            CsrfConfig(signed_mode=True)
+
+    def test_signed_mode_with_secret_key_valid(self) -> None:
+        """``signed_mode=True`` with a ``secret_key`` passes validation."""
+        config = CsrfConfig(signed_mode=True, secret_key="test-key")
+        assert config.signed_mode is True
+        assert config.secret_key == "test-key"
+
+    def test_signed_mode_false_without_secret_key_ok(self) -> None:
+        """``signed_mode=False`` does not require ``secret_key``."""
+        config = CsrfConfig(signed_mode=False)
+        assert config.signed_mode is False
+
+
+# ---------------------------------------------------------------------------
+# Signed mode test helpers
+# ---------------------------------------------------------------------------
+
+
+def _make_signed_token(raw_token: str, session_id: str, secret_key: str) -> str:
+    """Generate a signed CSRF cookie value: '<raw>.<hmac-sha256-hex>'."""
+    signature = hmac.new(
+        secret_key.encode("utf-8"),
+        f"{session_id}!{raw_token}".encode("utf-8"),
+        digestmod="sha256",
+    ).hexdigest()
+    return f"{raw_token}.{signature}"
+
+
+def _make_signed_config(secret_key: str = "test-secret", **kwargs) -> CsrfConfig:
+    """Return a CsrfConfig with signed_mode enabled."""
+    return CsrfConfig(signed_mode=True, secret_key=secret_key, **kwargs)
+
+
+# ---------------------------------------------------------------------------
+# Signed mode — token generation (cookie injection on responses)
+# ---------------------------------------------------------------------------
+
+
+def test_signed_mode_cookie_is_dot_separated() -> None:
+    """In signed mode the cookie value must be ``<raw>.<signature>``."""
+    config = _make_signed_config()
+    app = _make_app(csrf_config=config)
+    scope = _build_scope(method="GET", path="/")
+    scope["headers"] = [
+        (b"host", b"testserver"),
+        (b"cookie", b"session=user-session-id"),
+    ]
+
+    result = _run_middleware(app, scope)
+
+    cookie_values = [
+        v for k, v in result["headers"] if k.lower() == "set-cookie"
+    ]
+    assert len(cookie_values) >= 1
+    token_val = cookie_values[0].split(";")[0].split("=", 1)[1]
+    parts = token_val.split(".")
+    assert len(parts) == 2, f"expected token.sig format, got {token_val}"
+    assert len(parts[0]) > 0
+    assert len(parts[1]) > 0
+
+
+def test_signed_mode_no_session_cookie_skips_set_cookie() -> None:
+    """Without a session cookie no CSRF cookie is emitted."""
+    config = _make_signed_config()
+    app = _make_app(csrf_config=config)
+    scope = _build_scope(method="GET", path="/")
+    scope["headers"] = [(b"host", b"testserver")]
+
+    result = _run_middleware(app, scope)
+
+    cookie_values = [
+        v for k, v in result["headers"] if k.lower() == "set-cookie"
+    ]
+    assert len(cookie_values) == 0
+
+
+def test_signed_mode_stale_token_deleted_when_no_session() -> None:
+    """A stale CSRF cookie without a session must be deleted (Max-Age=0)."""
+    stale = _make_signed_token("stale-raw", "gone-session", "test-secret")
+    config = _make_signed_config()
+    app = _make_app(csrf_config=config)
+    scope = _build_scope(method="GET", path="/")
+    scope["headers"] = [
+        (b"host", b"testserver"),
+        (b"cookie", f"csrf_token={stale}".encode()),
+    ]
+
+    result = _run_middleware(app, scope)
+
+    cookie_values = [
+        v for k, v in result["headers"] if k.lower() == "set-cookie"
+    ]
+    assert len(cookie_values) == 1
+    assert "Max-Age=0" in cookie_values[0]
+    assert "csrf_token=;" in cookie_values[0]
+
+
+def test_signed_mode_echoes_token_when_session_unchanged() -> None:
+    """When session and token are both present, echo the token unchanged."""
+    secret = "test-secret"
+    session_id = "sess-abc"
+    existing = _make_signed_token("existing-raw", session_id, secret)
+
+    config = _make_signed_config(secret_key=secret)
+    app = _make_app(csrf_config=config)
+    scope = _build_scope(method="GET", path="/")
+    scope["headers"] = [
+        (b"host", b"testserver"),
+        (b"cookie", f"session={session_id}; csrf_token={existing}".encode()),
+    ]
+
+    result = _run_middleware(app, scope)
+
+    cookie_values = [
+        v for k, v in result["headers"] if k.lower() == "set-cookie"
+    ]
+    assert len(cookie_values) >= 1
+    assert any(existing in v for v in cookie_values)
+
+
+# ---------------------------------------------------------------------------
+# Signed mode — token verification on unsafe requests
+# ---------------------------------------------------------------------------
+
+
+def test_signed_mode_valid_tokens_pass() -> None:
+    """A correctly-signed token bound to the current session passes validation."""
+    secret = "test-secret"
+    session_id = "sess-abc"
+    raw_token = "raw-token-123"
+    signed_cookie = _make_signed_token(raw_token, session_id, secret)
+    signature = signed_cookie.split(".", 1)[1]
+
+    config = _make_signed_config(secret_key=secret)
+    app = _make_app(csrf_config=config)
+    scope = _build_scope(method="POST", path="/submit")
+    scope["headers"] = [
+        (b"host", b"testserver"),
+        (b"cookie", f"session={session_id}; csrf_token={signed_cookie}".encode()),
+        (b"x-authshield-csrf-token", signature.encode()),
+    ]
+
+    result = _run_middleware(app, scope)
+
+    assert result["status"] == 200
+
+
+def test_signed_mode_signature_mismatch_blocked() -> None:
+    """A wrong signature in the header is rejected."""
+    secret = "test-secret"
+    session_id = "sess-abc"
+    raw_token = "raw-token-123"
+    signed_cookie = _make_signed_token(raw_token, session_id, secret)
+
+    config = _make_signed_config(secret_key=secret)
+    app = _make_app(csrf_config=config)
+    scope = _build_scope(method="POST", path="/submit")
+    scope["headers"] = [
+        (b"host", b"testserver"),
+        (b"cookie", f"session={session_id}; csrf_token={signed_cookie}".encode()),
+        (b"x-authshield-csrf-token", b"wrong-signature-value"),
+    ]
+
+    result = _run_middleware(app, scope)
+
+    assert result["status"] == 403
+
+
+def test_signed_mode_missing_session_cookie_blocked() -> None:
+    """Signed mode requires the session cookie to be present on unsafe requests."""
+    secret = "test-secret"
+    session_id = "sess-abc"
+    raw_token = "raw-token-123"
+    signed_cookie = _make_signed_token(raw_token, session_id, secret)
+    signature = signed_cookie.split(".", 1)[1]
+
+    config = _make_signed_config(secret_key=secret)
+    app = _make_app(csrf_config=config)
+    scope = _build_scope(method="POST", path="/submit")
+    scope["headers"] = [
+        (b"host", b"testserver"),
+        (b"cookie", f"csrf_token={signed_cookie}".encode()),
+        (b"x-authshield-csrf-token", signature.encode()),
+    ]
+
+    result = _run_middleware(app, scope)
+
+    assert result["status"] == 403
+
+
+def test_signed_mode_malformed_cookie_no_dot_blocked() -> None:
+    """A signed cookie without a dot separator is malformed and blocked."""
+    secret = "test-secret"
+    session_id = "sess-abc"
+
+    config = _make_signed_config(secret_key=secret)
+    app = _make_app(csrf_config=config)
+    scope = _build_scope(method="POST", path="/submit")
+    scope["headers"] = [
+        (b"host", b"testserver"),
+        (b"cookie", f"session={session_id}; csrf_token=no_dot_token".encode()),
+        (b"x-authshield-csrf-token", b"some-signature"),
+    ]
+
+    result = _run_middleware(app, scope)
+
+    assert result["status"] == 403
+
+
+def test_signed_mode_token_stolen_across_sessions_blocked() -> None:
+    """A CSRF token signed for session A is invalid when used with session B."""
+    secret = "test-secret"
+    session_a = "sess-aaa"
+    session_b = "sess-bbb"
+    raw_token = "raw-token-123"
+
+    signed_for_a = _make_signed_token(raw_token, session_a, secret)
+    sig_for_a = signed_for_a.split(".", 1)[1]
+
+    config = _make_signed_config(secret_key=secret)
+    app = _make_app(csrf_config=config)
+    scope = _build_scope(method="POST", path="/submit")
+    scope["headers"] = [
+        (b"host", b"testserver"),
+        (b"cookie", f"session={session_b}; csrf_token={signed_for_a}".encode()),
+        (b"x-authshield-csrf-token", sig_for_a.encode()),
+    ]
+
+    result = _run_middleware(app, scope)
+
+    assert result["status"] == 403
+
+
+def test_signed_mode_only_cookie_present_blocked() -> None:
+    """Having only the CSRF cookie without the header token is blocked."""
+    secret = "test-secret"
+    session_id = "sess-abc"
+    raw_token = "raw-token-123"
+    signed_cookie = _make_signed_token(raw_token, session_id, secret)
+
+    config = _make_signed_config(secret_key=secret)
+    app = _make_app(csrf_config=config)
+    scope = _build_scope(method="POST", path="/submit")
+    scope["headers"] = [
+        (b"host", b"testserver"),
+        (b"cookie", f"session={session_id}; csrf_token={signed_cookie}".encode()),
+    ]
+
+    result = _run_middleware(app, scope)
+
+    assert result["status"] == 403
+
+
+def test_signed_mode_only_header_present_blocked() -> None:
+    """Having only the header token without the CSRF cookie is blocked."""
+    secret = "test-secret"
+
+    config = _make_signed_config(secret_key=secret)
+    app = _make_app(csrf_config=config)
+    scope = _build_scope(method="POST", path="/submit")
+    scope["headers"] = [
+        (b"host", b"testserver"),
+        (b"cookie", b"session=sess-abc"),
+        (b"x-authshield-csrf-token", b"some-signature"),
+    ]
+
+    result = _run_middleware(app, scope)
+
+    assert result["status"] == 403
+
+
+def test_signed_mode_safe_method_passes_without_session() -> None:
+    """Safe methods (GET, etc.) pass even without a session cookie."""
+    config = _make_signed_config()
+    app = _make_app(csrf_config=config)
+    scope = _build_scope(method="GET", path="/")
+    scope["headers"] = [(b"host", b"testserver")]
+
+    result = _run_middleware(app, scope)
+
+    assert result["status"] == 200
+
+
+def test_signed_mode_custom_session_cookie_name() -> None:
+    """A custom ``session_cookie_name`` is respected for lookup and signing."""
+    secret = "test-secret"
+    session_id = "sess-xyz"
+    raw_token = "raw-custom-sess"
+    signed_cookie = _make_signed_token(raw_token, session_id, secret)
+    signature = signed_cookie.split(".", 1)[1]
+
+    config = CsrfConfig(
+        signed_mode=True,
+        secret_key=secret,
+        session_cookie_name="custom-session",
+    )
+    app = _make_app(csrf_config=config)
+    scope = _build_scope(method="POST", path="/submit")
+    scope["headers"] = [
+        (b"host", b"testserver"),
+        (b"cookie", f"custom-session={session_id}; csrf_token={signed_cookie}".encode()),
+        (b"x-authshield-csrf-token", signature.encode()),
+    ]
+
+    result = _run_middleware(app, scope)
+
+    assert result["status"] == 200
+
+
+# ---------------------------------------------------------------------------
+# Excluded paths
+# ---------------------------------------------------------------------------
+
+
+def test_excluded_path_exact_match_skips_csrf() -> None:
+    """An exact ``excluded_paths`` match bypasses CSRF validation."""
+    config = CsrfConfig(excluded_paths=["/webhook"])
+    app = _make_app(csrf_config=config)
+    scope = _build_scope(method="POST", path="/webhook")
+    scope["headers"] = [(b"host", b"testserver")]
+
+    result = _run_middleware(app, scope)
+
+    assert result["status"] == 200
+
+
+def test_excluded_path_prefix_wildcard_skips_csrf() -> None:
+    """A trailing ``*`` in an excluded path matches all prefixed routes."""
+    config = CsrfConfig(excluded_paths=["/api/public/*"])
+    app = _make_app(csrf_config=config)
+    scope = _build_scope(method="POST", path="/api/public/callback")
+    scope["headers"] = [(b"host", b"testserver")]
+
+    result = _run_middleware(app, scope)
+
+    assert result["status"] == 200
+
+
+def test_excluded_path_does_not_affect_other_paths() -> None:
+    """Non-excluded paths are still protected even when other paths are excluded."""
+    config = CsrfConfig(excluded_paths=["/webhook"])
+    app = _make_app(csrf_config=config)
+    scope = _build_scope(method="POST", path="/submit")
+    scope["headers"] = [(b"host", b"testserver")]
+
+    result = _run_middleware(app, scope)
+
+    assert result["status"] == 403
