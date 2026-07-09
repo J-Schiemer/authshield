@@ -166,8 +166,8 @@ async def _handle_existing_email_user(
     sso_sub = claims.get("sub")
 
     if email_user.password_hash is not None and config.sso_config.auto_merging_enabled:
-        await config.sso_config.update_or_create_user(UserUpdate(sub=sso_sub, id=email_user.id))
-        return UserSession(session_token=secrets.token_urlsafe(32), user=email_user.user)
+        updated_user = await config.sso_config.update_or_create_user(UserUpdate(sub=sso_sub, id=email_user.id))
+        return UserSession(session_token=secrets.token_urlsafe(32), user=updated_user.user)
 
     if email_user.password_hash is None:
         username = claims.get("preferred_username") or claims.get("name") or _generate_username()
@@ -255,6 +255,11 @@ async def authenticate_user_by_sso(claims: dict, config: AuthConfig) -> Optional
 
     user = await config.sso_config.get_user_by_sub(sso_sub)
     if user:
+        if not user.active:
+            return None
+        
+        # TODO: Update the user roles here if update_roles_on_login is enabled?
+        
         return UserSession(session_token=secrets.token_urlsafe(32), user=user.user)
 
     name = _extract_name(claims)
@@ -266,8 +271,6 @@ async def authenticate_user_by_sso(claims: dict, config: AuthConfig) -> Optional
             if not email_user.active:
                 return None
 
-            result = await _handle_existing_email_user(claims, email_user, name, config)
-            if result is not None:
-                return result
+            return await _handle_existing_email_user(claims, email_user, name, config)
 
     return await _provision_new_user(claims, name, config)
