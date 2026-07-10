@@ -114,6 +114,9 @@ class SsoConfig(BaseModel):
     default_role : Optional[Any]
         Role automatically assigned to every SSO-provisioned or merged
         user, regardless of claim roles.  ``None`` means no default role.
+    update_roles_on_login: bool
+       When ``True``, the application will update the user's roles
+        after each login.  Defaults to ``False``.
     """
 
     get_user_by_sub: Callable[[str], Coroutine[None, None, Optional[UserEntry]]]
@@ -122,6 +125,7 @@ class SsoConfig(BaseModel):
     auto_provisioning_enabled: bool = False
     role_mapping: dict[str, Any] = {}
     default_role: Optional[Any] = None
+    update_roles_on_login: bool = False
 
 class AuthConfig(BaseModel):
     """Top-level authentication configuration.

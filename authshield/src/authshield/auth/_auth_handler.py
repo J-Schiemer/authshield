@@ -258,7 +258,9 @@ async def authenticate_user_by_sso(claims: dict, config: AuthConfig) -> Optional
         if not user.active:
             return None
         
-        # TODO: Update the user roles here if update_roles_on_login is enabled?
+        if config.sso_config.update_roles_on_login:
+            current_roles = _resolve_roles(claims, config)
+            user = await config.sso_config.update_or_create_user(UserUpdate(id=user.id, roles=current_roles))
         
         return UserSession(session_token=secrets.token_urlsafe(32), user=user.user)
 
