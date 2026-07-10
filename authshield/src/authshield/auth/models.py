@@ -24,7 +24,7 @@ class UserSession(BaseModel):
 
     session_token: str
     user: Any
-    roles: Optional[list[Any]]
+    roles: Optional[list[Any]] = None
 
 
 class UserEntry(BaseModel):

@@ -7,7 +7,7 @@ from fastapi import Depends, FastAPI
 from fastapi.testclient import TestClient
 
 from authshield.auth._require_auth import require_auth
-from authshield.auth._use_auth import get_auth_config
+from authshield.auth._auth_deps import get_auth_config
 from authshield.auth.models import UserSession
 from authshield.config import AuthConfig
 
@@ -45,6 +45,7 @@ def _configure_app(
         get_user=lambda e: None,
         session_resolver=resolver or _noop_resolver,
         cookie_name=cookie_name,
+        routes_enabled=False,
     )
     _override_config(app, config)
     return app
@@ -86,6 +87,7 @@ def test_session_resolver_not_configured_returns_500():
     app.dependency_overrides[get_auth_config] = lambda: AuthConfig(
         get_user=lambda e: None,
         session_resolver=None,
+        routes_enabled=False,
     )
 
     @app.get("/protected")
@@ -261,6 +263,7 @@ def test_config_read_from_app_state():
     app.state.authshield_auth_config = AuthConfig(
         get_user=lambda e: None,
         session_resolver=resolver,
+        routes_enabled=False,
     )
 
     @app.get("/protected")

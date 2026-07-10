@@ -1,7 +1,10 @@
 from typing import Any, Callable, Coroutine, Literal, Set, List, Optional
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from authshield._shared._in_memory_rate_limiter import InMemoryRateLimiter
+from authshield._shared.rate_limiter import RateLimiter
 from authshield.auth.models import UserEntry, UserSession, UserUpdate
+from authshield.session.base import SessionStorage
 
 
 class CsrfConfig(BaseModel):
@@ -127,6 +130,33 @@ class SsoConfig(BaseModel):
     default_role: Optional[Any] = None
     update_roles_on_login: bool = False
 
+class SsoAuthParams(BaseModel):
+    name: str
+    oidc_issuer: str
+    oidc_client_id: str
+    oidc_client_secret: str
+    oidc_redirect_uri: str
+    oidc_browser_url: Optional[str] = None
+    oidc_scopes: list[str]  = ["openid", "profile", "email"]
+    oidc_userinfo_endpoint: str = "https://openid.net/userinfo"
+    
+    browser_success_redirect: str = "/"
+    browser_failure_redirect: str = "/login"
+
+class AuthEndpointConfig(BaseModel):
+    model_config = ConfigDict(arbitrary_types_allowed=True)
+
+    rate_limiter: RateLimiter = InMemoryRateLimiter()
+    path_prefix: str = "/api/auth"
+    secure: bool = True
+    samesite: Literal["Lax", "Strict", "None"] = "Lax"
+    
+    sso_auth_params: list[SsoAuthParams] = Field(default_factory=list)
+
+    def get_sso_provider(self, name: str) -> SsoAuthParams | None:
+        return next((p for p in self.sso_auth_params if p.name == name), None)
+    
+
 class AuthConfig(BaseModel):
     """Top-level authentication configuration.
 
@@ -141,22 +171,54 @@ class AuthConfig(BaseModel):
     sso_config : Optional[SsoConfig]
         SSO-specific configuration.  Required when ``sso_enabled`` is
         ``True``; otherwise ``None``.
+    password_auth_enabled : bool
+        Whether password-based authentication is available.  Defaults to
+        ``True``.
+    auth_endpoint_config : Optional[AuthEndpointConfig]
+        Configuration for the built-in auth endpoints.  Required when
+        any authentication routing is enabled.
     cookie_name : str
         Name of the cookie that carries the session token.  The
         ``require_auth`` dependency reads this cookie.  Defaults to
         ``"session"``.
+    session_storage : Optional[SessionStorage]
+        Server-side session store.  When provided, ``use_auth`` auto-
+        creates a ``session_resolver`` that reads from this store, and
+        the auth routes use it for persistence and logout.
     session_resolver : Optional[Callable[[str], Coroutine]]
         Async callable that maps a session token string to a
         :class:`UserSession` (or ``None`` when the token is invalid or
         expired).  Used by :func:`~authshield.auth.require_auth`.
+        Auto-populated from ``session_storage`` when that is set and
+        this field is left as ``None``.
     get_user : Callable[[str], Coroutine]
         Async callable that retrieves a :class:`UserEntry` by email
         address.  Used by the password authentication flow and
         ``authenticate_user_by_sso`` for email-based account matching.
+    routes_enabled: bool
+        Signals that the routers are to be added under the path specified in the auth endpoint config.
     """
 
+    model_config = ConfigDict(arbitrary_types_allowed=True)
+
     sso_enabled: bool = False
+    password_auth_enabled: bool = True
+    auth_endpoint_config: AuthEndpointConfig | None = None
     sso_config: SsoConfig | None = None
     cookie_name: str = "session"
+    session_storage: SessionStorage | None = None
     session_resolver: Callable[[str], Coroutine[None, None, Optional[UserSession]]] | None = None
     get_user: Callable[[str], Coroutine[None, None, UserEntry]]
+    routes_enabled: bool = True
+
+    @model_validator(mode="after")
+    def validate_auth_configs(self) -> "AuthConfig":
+        """Ensure required sub-configs are present when their feature is enabled."""
+        if self.routes_enabled and self.auth_endpoint_config is None:
+            raise ValueError("auth_endpoint_config must be provided when routes_enabled is True.")
+        if self.sso_enabled:
+            if self.sso_config is None:
+                raise ValueError("sso_config must be provided when sso_enabled is True.")
+            if self.routes_enabled and not self.auth_endpoint_config.sso_auth_params:
+                raise ValueError("At least one SSO provider must be configured in sso_auth_params when sso_enabled and routes_enabled are True.")
+        return self

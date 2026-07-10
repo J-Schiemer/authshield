@@ -7,8 +7,9 @@ configuration methods into your application class at runtime.
 
 from authshield.extended import shield_class
 from authshield.csrf import CSRFMiddleware, use_csrf
-from authshield.config import CsrfConfig, AuthConfig, SsoConfig
+from authshield.config import CsrfConfig, AuthConfig, SsoConfig, SsoAuthParams, AuthEndpointConfig
 from authshield.auth import use_auth, get_auth_config, authenticate_user, authenticate_user_by_sso, require_auth, UserSession, UserEntry, UserUpdate
+from authshield.session import SessionStorage, InMemorySessionStorage
 
 __all__ = [
     "shield_class",
@@ -17,6 +18,8 @@ __all__ = [
     "CsrfConfig",
     "AuthConfig",
     "SsoConfig",
+    "SsoAuthParams",
+    "AuthEndpointConfig",
     "use_auth",
     "get_auth_config",
     "authenticate_user",
@@ -25,6 +28,8 @@ __all__ = [
     "UserSession",
     "UserEntry",
     "UserUpdate",
+    "SessionStorage",
+    "InMemorySessionStorage",
 ]
 
 __version__ = "0.1.0"

@@ -4,7 +4,7 @@ from typing import TYPE_CHECKING, Any
 
 from fastapi import Depends, HTTPException, Request
 
-from authshield.auth._use_auth import get_auth_config
+from authshield.auth._auth_deps import get_auth_config
 
 if TYPE_CHECKING:
     from authshield.config import AuthConfig
