@@ -125,6 +125,9 @@ async def sso_login(request: Request, name: str):
 
         redirect_response = RedirectResponse(url=sso_params.browser_success_redirect)
 
+        if auth_config.session_storage is not None:
+            await auth_config.session_storage.create(auth_result)
+
         redirect_response.set_cookie(
             key=auth_config.cookie_name,
             value=auth_result.session_token,

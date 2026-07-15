@@ -52,7 +52,7 @@ def use_auth(self: FastAPI, auth_config: AuthConfig) -> None:
             self.add_api_route(f"{prefix}/sso/flow/{{name}}", sso_redirect)
             self.add_api_route(f"{prefix}/sso/flow/{{name}}/result", sso_login)
         
-        self.add_api_route(f"{auth_config.auth_endpoint_config.path_prefix}/login", login)
-        self.add_api_route(f"{auth_config.auth_endpoint_config.path_prefix}/logout", logout)
+        self.add_api_route(f"{auth_config.auth_endpoint_config.path_prefix}/login", login, methods=["POST"])
+        self.add_api_route(f"{auth_config.auth_endpoint_config.path_prefix}/logout", logout, methods=["POST"])
 
     self.state.authshield_auth_config = auth_config
