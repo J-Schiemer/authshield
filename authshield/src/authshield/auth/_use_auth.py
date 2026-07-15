@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import secrets
 from typing import TYPE_CHECKING
 
 from fastapi import FastAPI
 from authlib.integrations.starlette_client import OAuth
+from starlette.middleware.sessions import SessionMiddleware
 
 from authshield.auth._auth_routes import login, logout, sso_login, sso_redirect
 
@@ -33,6 +35,10 @@ def use_auth(self: FastAPI, auth_config: AuthConfig) -> None:
     if auth_config.routes_enabled:
         if auth_config.sso_enabled and auth_config.auth_endpoint_config.sso_auth_params:
             self.state.authshield_oauth = OAuth()
+
+            secret = auth_config.sso_session_secret_key or secrets.token_urlsafe(32)
+            self.add_middleware(SessionMiddleware, secret_key=secret)
+
             for auth_params in auth_config.auth_endpoint_config.sso_auth_params:
                 self.state.authshield_oauth.register(
                     name=auth_params.name,

@@ -210,6 +210,7 @@ class AuthConfig(BaseModel):
     session_resolver: Callable[[str], Coroutine[None, None, Optional[UserSession]]] | None = None
     get_user: Callable[[str], Coroutine[None, None, UserEntry]]
     routes_enabled: bool = True
+    sso_session_secret_key: Optional[str] = None
 
     @model_validator(mode="after")
     def validate_auth_configs(self) -> "AuthConfig":
