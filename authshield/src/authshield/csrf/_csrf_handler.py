@@ -308,14 +308,26 @@ class CSRFMiddleware:
             return
 
         token = request.cookies.get(self.config.cookie_name)
-        if not token:
-            raw_token = secrets.token_urlsafe(32)
-            signature = hmac.new(
+        if token:
+            try:
+                raw_token, existing_signature = token.split(".", 1)
+                expected = hmac.new(
                     self.config.secret_key.encode("utf-8"),
                     f"{session_id}!{raw_token}".encode("utf-8"),
                     digestmod="sha256",
                 ).hexdigest()
-            token = f"{raw_token}.{signature}"
+                if hmac.compare_digest(expected, existing_signature):
+                    return token
+            except (ValueError, Exception):
+                pass
+
+        raw_token = secrets.token_urlsafe(32)
+        signature = hmac.new(
+                self.config.secret_key.encode("utf-8"),
+                f"{session_id}!{raw_token}".encode("utf-8"),
+                digestmod="sha256",
+            ).hexdigest()
+        token = f"{raw_token}.{signature}"
         return token
 
     async def _trigger_error(self, scope: Scope, receive: Receive, send: Send) -> None:
